@@ -179,6 +179,34 @@ export const ChildDashboard = () => {
         return () => clearInterval(interval);
     }, [isFocusing]);
 
+    // REALTIME CHEERS SUBSCRIPTION
+    useEffect(() => {
+        if (!user?.id) return;
+
+        const channel = supabase
+            .channel('public:family_cheers')
+            .on(
+                'postgres_changes',
+                {
+                    event: 'INSERT',
+                    schema: 'public',
+                    table: 'family_cheers',
+                    filter: `to_user_id=eq.${user.id}`
+                },
+                (payload) => {
+                    const msg = payload.new.message;
+                    if (msg) {
+                        setShowMotivation(msg);
+                        // Ocultar después de 5-8 segundos
+                        setTimeout(() => setShowMotivation(null), 8000);
+                    }
+                }
+            )
+            .subscribe();
+
+        return () => { supabase.removeChannel(channel); };
+    }, [user?.id]);
+
     // RENDER
     return (
         <div className={`min-h-screen w-full transition-colors duration-1000 ${isFocusing ? 'bg-gradient-to-b from-indigo-900 to-purple-800' : 'bg-gradient-to-b from-blue-50 to-indigo-50'} flex flex-col items-center p-6 relative overflow-y-auto font-sans pb-20`}>

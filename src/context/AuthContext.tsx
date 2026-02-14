@@ -203,9 +203,99 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             // If no user/session, try to load cached family for "Device Mode" (Child Login)
             if (!currentSession?.user) {
-                const cachedFamilyId = localStorage.getItem('cached_family_id');
-                if (cachedFamilyId) {
-                    await refreshMembers(cachedFamilyId);
+                const childSession = localStorage.getItem('child_session');
+                if (childSession) {
+                    try {
+                        const { memberId, pin } = JSON.parse(childSession);
+                        // Primero necesitamos cargar los miembros de la familia cached
+                        const cachedFamilyId = localStorage.getItem('cached_family_id');
+                        if (cachedFamilyId) {
+                            await refreshMembers(cachedFamilyId);
+                            // Pequeño delay para asegurar que refreshMembers termine o usar la promesa
+                            // Pero refreshMembers es async, así que esperamos.
+                            // El problema es que signInAsChild busca en familyMembers que es state.
+                            // State update es async. Necesitamos pasar los miembros o cargarlos dentro de signIn
+
+                            // Hack: Forzamos la carga de miembros dentro de signIn si no están
+                            // O mejor: Hacemos signIn que busque en DB si no encuentra en state?
+                            // Por ahora, re-implementare signInAsChild para que acepte carga directa o espere.
+                        }
+                    } catch (e) {
+                        console.error("Error parsing child session", e);
+                    }
+                }
+            }
+
+            // BETTER INIT STRATEGY for Child Persistence:
+            // 1. Check supabase session (Parent)
+            // 2. If none, check localStorage 'child_session'
+            // 3. Re-hydrate child directly from DB to avoid race conditions with familyMembers state
+
+            if (!currentSession?.user) {
+                const childSessionStr = localStorage.getItem('child_session');
+                if (childSessionStr) {
+                    try {
+                        const { memberId, pin } = JSON.parse(childSessionStr);
+                        // Fetch member directly to bypass state dependency
+                        const { data: member } = await supabase
+                            .from('family_members')
+                            .select('*')
+                            .eq('id', memberId)
+                            .single();
+
+                        if (member && member.pin === pin) {
+                            setUser({
+                                id: member.id,
+                                name: member.name,
+                                family_id: member.family_id,
+                                role: 'child',
+                                pin: pin
+                            });
+                            setRole('child');
+                            persistFamily(member.family_id);
+
+                            // Load profile data
+                            const { data: profile } = await supabase
+                                .from('profiles')
+                                .select('coins, streak_shields')
+                                .eq('id', member.id)
+                                .maybeSingle();
+
+                            setCoins(profile?.coins || 0);
+                            setStreakShields(profile?.streak_shields || 0);
+
+                            // Load backgrounds
+                            const { data: bgs } = await supabase
+                                .from('owned_backgrounds')
+                                .select('background_name')
+                                .eq('user_id', member.id);
+
+                            if (bgs) {
+                                setOwnedBackgrounds(['default', ...bgs.map((b: any) => b.background_name)]);
+                            }
+
+                            // Setup subscriptions
+                            refreshMembers(member.family_id); // Load siblings for UI
+
+                            // Profile sub
+                            supabase
+                                .channel('child-profile-changes')
+                                .on(
+                                    'postgres_changes',
+                                    { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${member.id}` },
+                                    (payload) => {
+                                        if (payload.new) {
+                                            setCoins(payload.new.coins);
+                                            setStreakShields(payload.new.streak_shields);
+                                        }
+                                    }
+                                )
+                                .subscribe();
+                        }
+                    } catch (e) {
+                        console.error("Error restoring child session:", e);
+                        localStorage.removeItem('child_session');
+                    }
                 }
             }
 
@@ -245,9 +335,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setUser(data.user);
             setRole('parent');
             await refreshFamily(data.user.id);
+
+            // Clear any child session remnants
+            localStorage.removeItem('child_session');
         }
 
         return { data, error };
+    };
+
+    const signOut = async () => {
+        await supabase.auth.signOut();
+        setUser(null);
+        setRole(null);
+        localStorage.removeItem('child_session');
+        // Optional: clear other local state if needed
     };
 
     const signInAsChild = async (memberId: string, pin: string) => {
@@ -260,6 +361,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             // Validar PIN real
             if (member.pin === pin) {
                 try {
+                    // PERSIST SESSION
+                    localStorage.setItem('child_session', JSON.stringify({ memberId, pin }));
+
                     setUser({
                         id: member.id,
                         name: member.name,

@@ -129,13 +129,47 @@ export const SessionSummary = ({ durationMinutes, onClose }: SessionSummaryProps
 
                                     try {
                                         setUploading(true);
-                                        const fileExt = file.name.split('.').pop();
+
+                                        // RESIZE IMAGE LOGIC
+                                        const resizeImage = (file: File): Promise<Blob> => {
+                                            return new Promise((resolve, reject) => {
+                                                const img = new Image();
+                                                img.src = URL.createObjectURL(file);
+                                                img.onload = () => {
+                                                    const canvas = document.createElement('canvas');
+                                                    const MAX_WIDTH = 1024;
+                                                    let width = img.width;
+                                                    let height = img.height;
+
+                                                    if (width > MAX_WIDTH) {
+                                                        height *= MAX_WIDTH / width;
+                                                        width = MAX_WIDTH;
+                                                    }
+
+                                                    canvas.width = width;
+                                                    canvas.height = height;
+                                                    const ctx = canvas.getContext('2d');
+                                                    ctx?.drawImage(img, 0, 0, width, height);
+
+                                                    canvas.toBlob((blob) => {
+                                                        if (blob) resolve(blob);
+                                                        else reject(new Error("Canvas to Blob failed"));
+                                                    }, 'image/jpeg', 0.7); // 70% quality
+                                                };
+                                                img.onerror = error => reject(error);
+                                            });
+                                        };
+
+                                        const resizedBlob = await resizeImage(file);
+                                        const resizedFile = new File([resizedBlob], file.name, { type: 'image/jpeg' });
+
+                                        const fileExt = 'jpg';
                                         const fileName = `${user?.id}/${Date.now()}.${fileExt}`;
                                         const filePath = `${fileName}`;
 
                                         const { error: uploadError } = await supabase.storage
                                             .from('evidence')
-                                            .upload(filePath, file);
+                                            .upload(filePath, resizedFile);
 
                                         if (uploadError) {
                                             throw uploadError;
@@ -155,12 +189,12 @@ export const SessionSummary = ({ durationMinutes, onClose }: SessionSummaryProps
                                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                             />
 
-                            <div className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors ${evidenceUrl ? 'border-green-500 bg-green-50' : 'border-gray-300 hover:bg-gray-50'}`}>
+                            <div className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors min-h-[150px] flex flex-col items-center justify-center ${evidenceUrl ? 'border-green-500 bg-green-50' : 'border-gray-300 hover:bg-gray-50'}`}>
                                 {evidenceUrl ? (
-                                    <div className="relative h-32 w-full">
-                                        <img src={evidenceUrl} alt="Evidencia" className="h-full w-full object-contain rounded-lg" />
-                                        <div className="absolute top-0 right-0 bg-green-500 text-white p-1 rounded-full shadow-sm">
-                                            <CheckCircle className="w-4 h-4" />
+                                    <div className="relative w-full flex justify-center">
+                                        <img src={evidenceUrl} alt="Evidencia" className="max-h-64 w-auto object-contain rounded-lg shadow-md" />
+                                        <div className="absolute top-0 right-0 bg-green-500 text-white p-1 rounded-full shadow-sm transform translate-x-1/2 -translate-y-1/2">
+                                            <CheckCircle className="w-5 h-5" />
                                         </div>
                                     </div>
                                 ) : (

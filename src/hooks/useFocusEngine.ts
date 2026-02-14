@@ -36,150 +36,111 @@ export const useFocusEngine = () => {
         }
     });
 
-    const [isFocusing, setIsFocusing] = useState(false);
+    const [isFocusing, setIsFocusing] = useState(() => {
+        return localStorage.getItem('isFocusing') === 'true';
+    });
     const [focusTimeElapsed, setFocusTimeElapsed] = useState(0);
-    const [targetDuration, setTargetDuration] = useState(25);
+    const [targetDuration, setTargetDuration] = useState(() => {
+        const saved = localStorage.getItem('targetDuration');
+        return saved ? parseInt(saved) : 25;
+    });
     const [lastCompletedSession, setLastCompletedSession] = useState<number | null>(null);
 
-    // Persistencia Local
+    // Persistencia Local de Game State
     useEffect(() => {
         localStorage.setItem('focus-game-state', JSON.stringify(gameState));
     }, [gameState]);
 
+    // Persistencia Local de Focus State (para sobrevivir recargas/crash)
+    useEffect(() => {
+        localStorage.setItem('isFocusing', isFocusing.toString());
+        localStorage.setItem('targetDuration', targetDuration.toString());
+    }, [isFocusing, targetDuration]);
+
     const lastCoinAwardTime = useRef<number>(0);
 
-    // Timer de sesión
+    // Timer de sesión basado en Timestamps (Soporte Pantalla Apagada)
     useEffect(() => {
         let interval: any;
+
         if (isFocusing && !gameState.isPenalized) {
+            // Guardar tiempo de inicio si no existe
+            const startTimeStr = localStorage.getItem('focus-start-time');
+            let startTime = startTimeStr ? parseInt(startTimeStr) : Date.now();
+
+            if (!startTimeStr) {
+                // Si estamos iniciando, guardamos el start time
+                // IMPORTANTE: Si recuperamos 'isFocusing' true del storage pero no hay start-time (raro), reiniciamos
+                localStorage.setItem('focus-start-time', startTime.toString());
+            }
+
             interval = setInterval(() => {
-                setFocusTimeElapsed(prev => {
-                    const newTime = prev + 1;
+                const now = Date.now();
+                const totalElapsedSeconds = Math.floor((now - startTime) / 1000);
 
-                    // INCREMENTAL REWARD: Every 60 seconds, award 1 coin directly
-                    // GUARD: Ensure we don't double-award within a short window (e.g. duplicate intervals)
-                    const now = Date.now();
-                    if (newTime % 60 === 0 && user?.id && (now - lastCoinAwardTime.current > 5000)) {
-                        lastCoinAwardTime.current = now; // Mark as awarded
+                setFocusTimeElapsed(totalElapsedSeconds);
 
-                        const awardIncremental = async () => {
+                // INCREMENTAL REWARD: Every 60 seconds
+                if (totalElapsedSeconds > 0 && totalElapsedSeconds % 60 === 0 && user?.id && (now - lastCoinAwardTime.current > 5000)) {
+                    lastCoinAwardTime.current = now;
+                    const awardIncremental = async () => {
+                        try {
+                            const userPin = user.pin || null;
+                            await (supabase.rpc as any)('award_coins', {
+                                p_user_id: user.id,
+                                p_amount: 1,
+                                p_pin: userPin
+                            });
+                            refreshProfile();
+                        } catch (err) {
+                            console.error("Error awarding incremental coin:", err);
+                        }
+                    };
+                    awardIncremental();
+                }
+
+                if (totalElapsedSeconds >= targetDuration * 60) {
+                    // ÉXITO: Sesión completada
+                    if (user?.id) {
+                        const awardBonus = async () => {
                             try {
-                                console.log("[FocusEngine] Attempting to award incremental coin...", user.id);
-                                // Use PIN from context if available (Child Mode)
                                 const userPin = user.pin || null;
-
-                                const { error: rpcError } = await (supabase.rpc as any)('award_coins', {
+                                await (supabase.rpc as any)('award_coins', {
                                     p_user_id: user.id,
-                                    p_amount: 1,
+                                    p_amount: targetDuration,
                                     p_pin: userPin
                                 });
-
-                                if (rpcError) {
-                                    console.error("[FocusEngine] RPC Error awarding coin:", rpcError);
-                                } else {
-                                    console.log("[FocusEngine] Coin awarded successfully via RPC!");
-                                    refreshProfile();
-                                }
+                                refreshProfile();
                             } catch (err) {
-                                console.error("Error awarding incremental coin:", err);
+                                console.error("Error awarding bonus coins:", err);
                             }
                         };
-                        awardIncremental();
+                        awardBonus();
                     }
 
-                    if (newTime >= targetDuration * 60) {
-                        // ÉXITO: Sesión completada
-                        // BONUS REWARD: Award coins equal to session duration (e.g. 25 mins = 25 coins)
-                        if (user?.id) {
-                            const awardBonus = async () => {
-                                try {
-                                    console.log(`[FocusEngine] Awarding SESSION BONUS: ${targetDuration} coins`);
-                                    const userPin = user.pin || null;
-                                    await (supabase.rpc as any)('award_coins', {
-                                        p_user_id: user.id,
-                                        p_amount: targetDuration, // Bonus amount = duration
-                                        p_pin: userPin
-                                    });
-                                    refreshProfile();
-                                } catch (err) {
-                                    console.error("Error awarding bonus coins:", err);
-                                }
-                            };
-                            awardBonus();
-                        }
+                    setGameState(s => ({
+                        ...s,
+                        xp: s.xp + (targetDuration * 10),
+                        mood: 'happy'
+                    }));
 
-                        setGameState(s => ({
-                            ...s,
-                            xp: s.xp + (targetDuration * 10), // XP Bonus
-                            mood: 'happy'
-                        }));
-                        setIsFocusing(false);
-                        setLastCompletedSession(targetDuration);
-                        return 0;
-                    }
-                    return newTime;
-                });
+                    // Limpieza
+                    setIsFocusing(false);
+                    localStorage.removeItem('focus-start-time');
+                    // localStorage.removeItem('isFocusing'); // handled by effect
+                    setLastCompletedSession(targetDuration);
+                }
             }, 1000);
+        } else {
+            localStorage.removeItem('focus-start-time');
         }
+
         return () => clearInterval(interval);
     }, [isFocusing, gameState.isPenalized, targetDuration, user]);
 
-    // Detección de Fuga (Tab Change)
-    useEffect(() => {
-        const handleVisibilityChange = async () => {
-            if (document.hidden && isFocusing) {
-                // Usuario cambió de pestaña mientras se enfocaba!
-
-                // 1. Log Distraction
-                if (user?.id) {
-                    supabase.from('distractions').insert([{
-                        user_id: user.id,
-                        detected_at: new Date().toISOString(),
-                        duration_seconds: 0 // Could calc diff
-                    }] as any).then(({ error }) => {
-                        if (error) console.error("Error logging distraction:", error);
-                    });
-
-                    // 2. Award Partial Coins (1 coin per minute completed)
-                    const minutesFocused = Math.floor(focusTimeElapsed / 60);
-                    console.log(`[FocusEngine] Distraction! Elapsed: ${focusTimeElapsed}s, Minutes: ${minutesFocused}`);
-
-                    if (minutesFocused > 0) {
-                        try {
-                            // Find PIN for authorization (if child mode)
-                            const userPin = user.pin || null;
-
-                            const { error: rpcError } = await (supabase.rpc as any)('award_coins', {
-                                p_user_id: user.id,
-                                p_amount: minutesFocused,
-                                p_pin: userPin
-                            });
-
-                            if (rpcError) console.error("[FocusEngine] Error awarding coins via RPC:", rpcError);
-                            else console.log("[FocusEngine] Coins awarded successfully via RPC!");
-
-                        } catch (err) {
-                            console.error("[FocusEngine] Unexpected error awarding coins:", err);
-                        }
-                    } else {
-                        console.log("[FocusEngine] No coins awarded (< 1 min).");
-                    }
-                }
-
-                // 3. Penalizar
-                setIsFocusing(false);
-                setFocusTimeElapsed(0);
-                setGameState(prev => ({
-                    ...prev,
-                    mood: 'sad',
-                    isPenalized: true // Requiere "Curar" para volver a empezar
-                }));
-            }
-        };
-
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-        return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-    }, [isFocusing, user, focusTimeElapsed]);
+    // Detección de Fuga ELIMINADA para permitir apagar pantalla
+    // La app confía en que el usuario está "Focusing" si la sesión está activa.
+    // Solo se penaliza si el usuario cancela manualmente.
 
     // Heartbeat (Presence)
     useEffect(() => {

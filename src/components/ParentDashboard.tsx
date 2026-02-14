@@ -68,8 +68,11 @@ export const ParentDashboard = () => {
         }
     };
 
+    const [freezing, setFreezing] = useState(false);
+
     const handleFreeze = async (durationMinutes: number) => {
-        if (!familyMembers.length) return;
+        if (!familyMembers.length || freezing) return;
+        setFreezing(true);
         const familyId = familyMembers[0].family_id;
 
         // 0 = Indefinite (null)
@@ -81,6 +84,8 @@ export const ParentDashboard = () => {
             status: 'locked',
             freeze_ends_at: freezeEndsAt
         }).eq('id', familyId);
+
+        setFreezing(false);
 
         if (error) {
             alert("Error al congelar: " + error.message);
@@ -238,21 +243,24 @@ export const ParentDashboard = () => {
                             <div className="grid grid-cols-3 gap-2">
                                 <button
                                     onClick={() => handleFreeze(15)}
-                                    className="py-3 px-2 rounded-xl font-bold text-xs bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200"
+                                    disabled={freezing}
+                                    className="py-3 px-2 rounded-xl font-bold text-xs bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 disabled:opacity-50"
                                 >
-                                    15 MIN
+                                    {freezing ? '...' : '15 MIN'}
                                 </button>
                                 <button
                                     onClick={() => handleFreeze(60)}
-                                    className="py-3 px-2 rounded-xl font-bold text-xs bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200"
+                                    disabled={freezing}
+                                    className="py-3 px-2 rounded-xl font-bold text-xs bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 disabled:opacity-50"
                                 >
-                                    1 HORA
+                                    {freezing ? '...' : '1 HORA'}
                                 </button>
                                 <button
                                     onClick={() => handleFreeze(0)} // 0 = Indefinite
-                                    className="py-3 px-2 rounded-xl font-bold text-xs bg-red-50 text-red-600 hover:bg-red-100 border border-red-200"
+                                    disabled={freezing}
+                                    className="py-3 px-2 rounded-xl font-bold text-xs bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 disabled:opacity-50"
                                 >
-                                    INDEFINIDO
+                                    {freezing ? '...' : 'INDEFINIDO'}
                                 </button>
                             </div>
                         )}
@@ -294,9 +302,16 @@ const MissionControl = ({ tasks, familyId, familyMembers }: { tasks: any[], fami
     };
 
     const hApproveTask = async (taskId: string) => {
+        // Optimistic Update
+        setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'approved' } : t));
+
         // En un caso real, esto triggería dar monedas al hijo
-        await supabase.from('tasks').update({ status: 'approved', completed_at: new Date().toISOString() }).eq('id', taskId);
-        // alert("Misión aprobada/completada");
+        const { error } = await supabase.from('tasks').update({ status: 'approved', completed_at: new Date().toISOString() }).eq('id', taskId);
+
+        if (error) {
+            alert("Error aprobando misión: " + error.message);
+            // Rollback (opcional, por ahora simple alert)
+        }
     };
 
     const getStatusBadge = (status: string) => {
